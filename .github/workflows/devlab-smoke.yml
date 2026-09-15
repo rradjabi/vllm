@@ -1,7 +1,7 @@
 name: DevLab vLLM recon
 
 # Lives in rradjabi/vllm on devlab/ephemeral-ci as
-# .github/workflows/devlab-smoke.yml. rradjabi/ephemeral-ci#203.
+# .github/workflows/devlab-smoke.yml. rradjabi/ephemeral-ci#218.
 #
 # This builds nothing on purpose. vLLM's own ROCm base image build is budgeted
 # at nine hours upstream (AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES in
