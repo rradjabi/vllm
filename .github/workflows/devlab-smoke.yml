@@ -1,0 +1,118 @@
+name: DevLab vLLM recon
+
+# Lives in rradjabi/vllm on devlab/ephemeral-ci as
+# .github/workflows/devlab-smoke.yml. rradjabi/ephemeral-ci#203.
+#
+# This builds nothing on purpose. vLLM's own ROCm base image build is budgeted
+# at nine hours upstream (AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES in
+# vllm-project/ci-infra), so "just build it and see" is not a measurement, it is
+# a way to lose a day. The question this answers first is what the Halo already
+# has and which install path is even reachable from the lab, because that is
+# what decides whether a gfx1151 job can be a nightly or has to be a weekly.
+#
+# Upstream supports gfx1151 and does not test it:
+#   - docs list "Ryzen AI MAX / AI 300 Series (gfx1151/1150)" as supported
+#   - CMakeLists HIP_SUPPORTED_ARCHS includes gfx1151
+#   - Dockerfile.rocm_base defaults PYTORCH_ROCM_ARCH to a list including it
+#   - but CI builds gfx90a;gfx942;gfx950 and tests MI250/MI300/MI355 only
+#
+# The fork carries upstream's .github/workflows unmodified beside this file and
+# that is safe: pre-commit fires on push to main only, proto-crate on proto-v*
+# tags, buf on v* tags, and all three are guarded on repository_owner being
+# vllm-project. Pushing a devlab branch here runs this file and nothing else.
+# Re-check that before adding any trigger other than workflow_dispatch.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    name: Strix Halo recon
+    runs-on: [self-hosted, Linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 30
+    steps:
+      - name: Which slot ran this
+        run: |
+          echo "runner:    ${{ runner.name }}"
+          echo "host:      $(hostname)"
+          echo "kernel:    $(uname -sr)"
+
+      - name: GPU
+        run: |
+          echo "--- lspci"
+          lspci -nn | grep -iE 'vga|display|processing accelerator' || echo "none reported"
+          echo "--- rocminfo gfx"
+          if command -v rocminfo >/dev/null 2>&1; then
+            rocminfo | grep -iE 'Name:|gfx' | head -20
+          else
+            echo "rocminfo not installed"
+          fi
+          echo "--- rocm-smi"
+          command -v rocm-smi >/dev/null 2>&1 && rocm-smi --showproductname 2>/dev/null | head -10 || echo "rocm-smi not installed"
+
+      # vLLM pins hard to a ROCm version through its base image. Ours is 7.2.1,
+      # which matched ollama's container exactly; whether it matches whatever
+      # the ROCm team's wheel is built against is the thing to watch.
+      - name: ROCm version on the host
+        run: |
+          ls -d /opt/rocm* 2>/dev/null || echo "no /opt/rocm"
+          cat /opt/rocm/.info/version 2>/dev/null || echo "no version file"
+          command -v hipcc >/dev/null 2>&1 && hipcc --version | head -3 || echo "hipcc not installed"
+
+      - name: Python and toolchain
+        run: |
+          for c in python3 pip3 uv cmake ninja git docker; do
+            if command -v $c >/dev/null 2>&1; then
+              printf '%-8s %s\n' "$c" "$($c --version 2>&1 | head -1)"
+            else
+              printf '%-8s %s\n' "$c" "not installed"
+            fi
+          done
+
+      # The workspace is on /mnt/scratch, 1.7TB. Root is 32GB and a vLLM wheel
+      # plus torch-rocm plus a model will not fit there. Worth printing because
+      # the failure mode when it is wrong is a confusing ENOSPC mid-install.
+      - name: Disk
+        run: |
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP" / 2>/dev/null
+
+      # Reachability only. Nothing here downloads a wheel; each check is a HEAD
+      # or an index query, because the point is to find out which of these the
+      # lab egress permits before a job depends on one.
+      - name: Can we reach the candidate wheel sources
+        run: |
+          check() {
+            printf '%-46s ' "$1"
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -L "$1" 2>/dev/null || echo "000")
+            echo "$code"
+          }
+          check https://pypi.org/simple/vllm/
+          check https://download.pytorch.org/whl/rocm6.4/
+          check https://download.pytorch.org/whl/nightly/rocm6.4/
+          check https://rocm.frameworks.amd.com/
+          check https://repo.radeon.com/rocm/manylinux/
+          check https://d2awnip2yjpvqn.cloudfront.net/v2/
+          echo "(000 means unreachable or timed out)"
+
+      # Does a prebuilt image exist that we could run instead of building? This
+      # only reads the registry manifest, it does not pull the image.
+      - name: Are the upstream ROCm CI images reachable
+        run: |
+          for img in rocm/vllm-dev:ci_base rocm/vllm:latest; do
+            printf '%-32s ' "$img"
+            if docker manifest inspect "$img" >/dev/null 2>&1; then
+              echo "manifest OK"
+            else
+              echo "not reachable / not present"
+            fi
+          done
+
+      # What pip thinks is installable here, without installing it. Tells us
+      # whether a stock vllm wheel even exists for this Python and platform.
+      - name: What does pip think is available
+        run: |
+          python3 -m pip --version || exit 0
+          echo "--- vllm versions visible on PyPI"
+          python3 -m pip index versions vllm 2>&1 | head -5 || echo "pip index unavailable"
+          echo "--- torch versions visible on PyPI"
+          python3 -m pip index versions torch 2>&1 | head -5 || echo "pip index unavailable"
